@@ -227,6 +227,12 @@ def capture_points(data):
     elif (start_or_stop == "stop"):
         cameras.stop_capturing_points()
 
+@socketio.on("capture-single-point")
+def capture_single_point(data):
+    cameras = Cameras.instance()
+    cameras.set_socketio(socketio)
+    cameras.capture_single_point()
+
 @socketio.on("calculate-camera-pose")
 def calculate_camera_pose(data):
     cameras = Cameras.instance()

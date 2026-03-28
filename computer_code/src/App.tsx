@@ -76,6 +76,10 @@ export default function App() {
     socket.emit("capture-points", { startOrStop })
   }
 
+  const captureSinglePoint = () => {
+    socket.emit("capture-single-point", {})
+  }
+
   useEffect(() => {
     socket.on("image-points", (data) => {
       setCapturedPointsForPose(`${capturedPointsForPose}${JSON.stringify(data)},`)
@@ -515,6 +519,15 @@ export default function App() {
                     {capturingPointsForPose ? "Stop" : "Start"}
                   </Button>
                 </a>
+              </Col>
+              <Col>
+                <Button
+                  size='sm'
+                  variant="outline-success"
+                  disabled={!cameraStreamRunning}
+                  onClick={() => captureSinglePoint()}>
+                  Capture Single Point
+                </Button>
               </Col>
             </Row>
             <Row className='pt-3'>
