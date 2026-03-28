@@ -244,8 +244,14 @@ def calculate_camera_pose(data):
         camera1_image_points = np.take(camera1_image_points, not_none_indicies, axis=0).astype(np.float32)
         camera2_image_points = np.take(camera2_image_points, not_none_indicies, axis=0).astype(np.float32)
 
+        if len(camera1_image_points) < 8:
+            print(f"Not enough matching points between camera {camera_i} and {camera_i+1}: {len(camera1_image_points)} (need at least 8)")
+            return
         F, _ = cv.findFundamentalMat(camera1_image_points, camera2_image_points, cv.FM_RANSAC, 1, 0.99999)
-        E = essential_from_fundamental(F, cameras.get_camera_params(0)["intrinsic_matrix"], cameras.get_camera_params(1)["intrinsic_matrix"])
+        if F is None:
+            print(f"Could not compute fundamental matrix between camera {camera_i} and {camera_i+1}. Collect more points.")
+            return
+        E = essential_from_fundamental(F, cameras.get_camera_params(camera_i)["intrinsic_matrix"], cameras.get_camera_params(camera_i+1)["intrinsic_matrix"])
         possible_Rs, possible_ts = motion_from_essential(E)
 
         R = None
