@@ -68,6 +68,7 @@ class Cameras:
 
     def _camera_read(self):
         frames, _ = self.cameras.read()
+        frames = [frame.copy() for frame in frames]
 
         for i in range(0, self.num_cameras):
             frames[i] = np.rot90(frames[i], k=self.camera_params[i]["rotation"])
