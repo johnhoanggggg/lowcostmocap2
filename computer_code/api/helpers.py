@@ -404,54 +404,63 @@ def _filter_and_subsample_points(image_points, camera_poses, max_points=100):
     return filtered
 
 
-def bundle_adjustment(image_points, camera_poses, socketio):
+def bundle_adjustment(image_points, camera_poses, socketio, ref_cam=2):
     cameras = Cameras.instance()
+    num_cameras = len(camera_poses)
 
     image_points = _filter_and_subsample_points(image_points, camera_poses)
 
-    def params_to_camera_poses(params):
-        focal_distances = []
-        num_cameras = int((params.size-1)/7)+1
-        camera_poses = [{
+    # Build list of non-reference camera indices
+    opt_cams = [i for i in range(num_cameras) if i != ref_cam]
+
+    def params_to_camera_poses_and_focals(params):
+        focal_distances = [None] * num_cameras
+        poses = [None] * num_cameras
+
+        # Reference camera: fixed identity pose, focal from first param
+        focal_distances[ref_cam] = params[0]
+        poses[ref_cam] = {
             "R": np.eye(3),
             "t": np.array([0,0,0], dtype=np.float32)
-        }]
-        focal_distances.append(params[0])
-        for i in range(0, num_cameras-1):
-            focal_distances.append(params[i*7+1])
-            camera_poses.append({
-                "R": Rotation.as_matrix(Rotation.from_rotvec(params[i*7 + 2 : i*7 + 3 + 2])),
-                "t": params[i*7 + 3 + 2 : i*7 + 6 + 2]
-            })
+        }
 
-        return camera_poses, focal_distances
+        # Other cameras: 7 params each (focal, rotvec[3], t[3])
+        offset = 1
+        for cam_i in opt_cams:
+            focal_distances[cam_i] = params[offset]
+            poses[cam_i] = {
+                "R": Rotation.as_matrix(Rotation.from_rotvec(params[offset+1 : offset+4])),
+                "t": params[offset+4 : offset+7]
+            }
+            offset += 7
+
+        return poses, focal_distances
 
     def residual_function(params):
-        camera_poses, focal_distances = params_to_camera_poses(params)
-        for i in range(0, len(camera_poses)):
+        poses, focal_distances = params_to_camera_poses_and_focals(params)
+        for i in range(num_cameras):
             intrinsic = cameras.get_camera_params(i)["intrinsic_matrix"]
             intrinsic[0, 0] = focal_distances[i]
             intrinsic[1, 1] = focal_distances[i]
-        object_points = triangulate_points(image_points, camera_poses)
-        errors = calculate_reprojection_errors(image_points, object_points, camera_poses)
+            cameras.set_camera_params(i, intrinsic_matrix=intrinsic.tolist())
+        object_points = triangulate_points(image_points, poses)
+        errors = calculate_reprojection_errors(image_points, object_points, poses)
         errors = errors.astype(np.float32)
-        socketio.emit("camera-pose", {"camera_poses": camera_pose_to_serializable(camera_poses)})
+        socketio.emit("camera-pose", {"camera_poses": camera_pose_to_serializable(poses)})
 
         return errors
 
-    focal_distance = cameras.get_camera_params(0)["intrinsic_matrix"][0,0]
-    init_params = np.array([focal_distance])
-    for i, camera_pose in enumerate(camera_poses[1:]):
-        rot_vec = Rotation.as_rotvec(Rotation.from_matrix(camera_pose["R"])).flatten()
-        focal_distance = cameras.get_camera_params(i+1)["intrinsic_matrix"][0,0]
-        init_params = np.concatenate([init_params, [focal_distance]])
-        init_params = np.concatenate([init_params, rot_vec])
-        init_params = np.concatenate([init_params, camera_pose["t"].flatten()])
+    # Build initial params: ref focal, then [focal, rotvec, t] for each non-ref camera
+    init_params = np.array([cameras.get_camera_params(ref_cam)["intrinsic_matrix"][0,0]])
+    for cam_i in opt_cams:
+        focal = cameras.get_camera_params(cam_i)["intrinsic_matrix"][0,0]
+        rot_vec = Rotation.as_rotvec(Rotation.from_matrix(camera_poses[cam_i]["R"])).flatten()
+        init_params = np.concatenate([init_params, [focal], rot_vec, camera_poses[cam_i]["t"].flatten()])
 
     res = optimize.least_squares(
         residual_function, init_params, verbose=2, loss="cauchy", ftol=1E-4
     )
-    return params_to_camera_poses(res.x)[0]
+    return params_to_camera_poses_and_focals(res.x)[0]
     
 
 def triangulate_point(image_points, camera_poses):

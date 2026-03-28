@@ -239,48 +239,57 @@ def calculate_camera_pose(data):
     image_points = np.array(data["cameraPoints"])
     image_points_t = image_points.transpose((1, 0, 2))
 
-    camera_poses = [{
+    ref_cam = 2  # Camera 3 (index 2) as reference
+    ref_image_points = image_points_t[ref_cam]
+
+    camera_poses = [None] * cameras.num_cameras
+    camera_poses[ref_cam] = {
         "R": np.eye(3),
         "t": np.array([[0],[0],[0]], dtype=np.float32)
-    }]
-    for camera_i in range(0, cameras.num_cameras-1):
-        camera1_image_points = image_points_t[camera_i]
-        camera2_image_points = image_points_t[camera_i+1]
-        not_none_indicies = np.where(np.all(camera1_image_points != None, axis=1) & np.all(camera2_image_points != None, axis=1))[0]
-        camera1_image_points = np.take(camera1_image_points, not_none_indicies, axis=0).astype(np.float32)
-        camera2_image_points = np.take(camera2_image_points, not_none_indicies, axis=0).astype(np.float32)
+    }
 
-        if len(camera1_image_points) < 8:
-            print(f"Not enough matching points between camera {camera_i} and {camera_i+1}: {len(camera1_image_points)} (need at least 8)")
+    for camera_i in range(cameras.num_cameras):
+        if camera_i == ref_cam:
+            continue
+
+        cam_i_points = image_points_t[camera_i]
+        not_none = np.where(
+            np.all(ref_image_points != None, axis=1) &
+            np.all(cam_i_points != None, axis=1)
+        )[0]
+        ref_pts = np.take(ref_image_points, not_none, axis=0).astype(np.float32)
+        cam_pts = np.take(cam_i_points, not_none, axis=0).astype(np.float32)
+
+        if len(ref_pts) < 8:
+            print(f"Not enough matching points between camera {ref_cam} and {camera_i}: {len(ref_pts)}")
             return
-        F, _ = cv.findFundamentalMat(camera1_image_points, camera2_image_points, cv.FM_RANSAC, 1, 0.99999)
+
+        F, _ = cv.findFundamentalMat(ref_pts, cam_pts, cv.FM_RANSAC, 1, 0.99999)
         if F is None:
-            print(f"Could not compute fundamental matrix between camera {camera_i} and {camera_i+1}. Collect more points.")
+            print(f"Could not compute fundamental matrix between camera {ref_cam} and {camera_i}")
             return
-        E = essential_from_fundamental(F, cameras.get_camera_params(camera_i)["intrinsic_matrix"], cameras.get_camera_params(camera_i+1)["intrinsic_matrix"])
+
+        E = essential_from_fundamental(F,
+            cameras.get_camera_params(ref_cam)["intrinsic_matrix"],
+            cameras.get_camera_params(camera_i)["intrinsic_matrix"])
         possible_Rs, possible_ts = motion_from_essential(E)
 
         R = None
         t = None
-        max_points_infront_of_camera = 0
-        for i in range(0, 4):
-            object_points = triangulate_points(np.hstack([np.expand_dims(camera1_image_points, axis=1), np.expand_dims(camera2_image_points, axis=1)]), np.concatenate([[camera_poses[-1]], [{"R": possible_Rs[i], "t": possible_ts[i]}]]))
-            object_points_camera_coordinate_frame = np.array([possible_Rs[i].T @ object_point for object_point in object_points])
+        max_infront = 0
+        for j in range(4):
+            obj_pts = triangulate_points(
+                np.hstack([np.expand_dims(ref_pts, axis=1), np.expand_dims(cam_pts, axis=1)]),
+                [camera_poses[ref_cam], {"R": possible_Rs[j], "t": possible_ts[j]}]
+            )
+            obj_cam = np.array([possible_Rs[j].T @ pt for pt in obj_pts])
+            infront = np.sum(obj_pts[:,2] > 0) + np.sum(obj_cam[:,2] > 0)
+            if infront > max_infront:
+                max_infront = infront
+                R = possible_Rs[j]
+                t = possible_ts[j]
 
-            points_infront_of_camera = np.sum(object_points[:,2] > 0) + np.sum(object_points_camera_coordinate_frame[:,2] > 0)
-
-            if points_infront_of_camera > max_points_infront_of_camera:
-                max_points_infront_of_camera = points_infront_of_camera
-                R = possible_Rs[i]
-                t = possible_ts[i]
-
-        R = R @ camera_poses[-1]["R"]
-        t = camera_poses[-1]["t"] + (camera_poses[-1]["R"] @ t)
-
-        camera_poses.append({
-            "R": R,
-            "t": t
-        })
+        camera_poses[camera_i] = {"R": R, "t": t}
 
     camera_poses = bundle_adjustment(image_points, camera_poses, socketio)
 
