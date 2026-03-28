@@ -337,8 +337,48 @@ def motion_from_essential(E: np.ndarray) -> Tuple[List[np.ndarray], List[np.ndar
     return rotations_matrices, translations
 
 
+def _filter_and_subsample_points(image_points, camera_poses, max_points=100):
+    """Filter out points seen by <2 cameras and subsample to max_points."""
+    # Filter: keep only points visible in at least 2 cameras
+    filtered = []
+    for pts in image_points:
+        pts = np.array(pts)
+        num_visible = np.sum(np.any(pts != None, axis=1))
+        if num_visible >= 2:
+            filtered.append(pts)
+
+    if len(filtered) == 0:
+        return np.array(image_points)
+
+    # Remove high reprojection error outliers using initial poses
+    filtered = np.array(filtered)
+    if len(filtered) > max_points:
+        object_points = triangulate_points(filtered, camera_poses)
+        errors = calculate_reprojection_errors(filtered, object_points, camera_poses)
+        if len(errors) > 0:
+            # Remove worst 20% of points
+            threshold = np.percentile(errors, 80)
+            keep_mask = np.array([
+                calculate_reprojection_error(fp, op, camera_poses) is not None and
+                calculate_reprojection_error(fp, op, camera_poses) < threshold
+                for fp, op in zip(filtered, object_points)
+            ])
+            filtered = filtered[keep_mask]
+
+    # Subsample if still too many
+    if len(filtered) > max_points:
+        indices = np.random.choice(len(filtered), max_points, replace=False)
+        indices.sort()
+        filtered = filtered[indices]
+
+    print(f"Bundle adjustment: using {len(filtered)} points (from {len(image_points)} total)")
+    return filtered
+
+
 def bundle_adjustment(image_points, camera_poses, socketio):
     cameras = Cameras.instance()
+
+    image_points = _filter_and_subsample_points(image_points, camera_poses)
 
     def params_to_camera_poses(params):
         num_cameras = int(params.size / 6) + 1
@@ -370,7 +410,7 @@ def bundle_adjustment(image_points, camera_poses, socketio):
         init_params = np.concatenate([init_params, camera_pose["t"].flatten()])
 
     res = optimize.least_squares(
-        residual_function, init_params, verbose=2, loss="cauchy", ftol=1E-2
+        residual_function, init_params, verbose=2, loss="cauchy", ftol=1E-4
     )
     return params_to_camera_poses(res.x)
     
