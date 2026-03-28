@@ -404,7 +404,7 @@ def _filter_and_subsample_points(image_points, camera_poses, max_points=100):
     return filtered
 
 
-def bundle_adjustment(image_points, camera_poses, socketio, ref_cam=2):
+def bundle_adjustment(image_points, camera_poses, socketio, ref_cam=2, num_starts=10):
     cameras = Cameras.instance()
     num_cameras = len(camera_poses)
 
@@ -412,6 +412,9 @@ def bundle_adjustment(image_points, camera_poses, socketio, ref_cam=2):
 
     # Build list of non-reference camera indices
     opt_cams = [i for i in range(num_cameras) if i != ref_cam]
+
+    # Save original intrinsics to restore between runs
+    original_intrinsics = [cameras.get_camera_params(i)["intrinsic_matrix"].tolist() for i in range(num_cameras)]
 
     def params_to_camera_poses_and_focals(params):
         focal_distances = [None] * num_cameras
@@ -446,7 +449,6 @@ def bundle_adjustment(image_points, camera_poses, socketio, ref_cam=2):
         object_points = triangulate_points(image_points, poses)
         errors = calculate_reprojection_errors(image_points, object_points, poses)
         errors = errors.astype(np.float32)
-        socketio.emit("camera-pose", {"camera_poses": camera_pose_to_serializable(poses)})
 
         return errors
 
@@ -457,10 +459,53 @@ def bundle_adjustment(image_points, camera_poses, socketio, ref_cam=2):
         rot_vec = Rotation.as_rotvec(Rotation.from_matrix(camera_poses[cam_i]["R"])).flatten()
         init_params = np.concatenate([init_params, [focal], rot_vec, camera_poses[cam_i]["t"].flatten()])
 
-    res = optimize.least_squares(
-        residual_function, init_params, verbose=2, loss="cauchy", ftol=1E-4
-    )
-    return params_to_camera_poses_and_focals(res.x)[0]
+    best_cost = np.inf
+    best_params = None
+
+    for start in range(num_starts):
+        # Restore original intrinsics before each run
+        for i in range(num_cameras):
+            cameras.set_camera_params(i, intrinsic_matrix=original_intrinsics[i])
+
+        if start == 0:
+            perturbed = init_params.copy()
+        else:
+            perturbed = init_params.copy()
+            offset = 0
+            # Perturb ref camera focal length
+            perturbed[offset] += np.random.normal(0, 5)
+            offset = 1
+            for cam_i in opt_cams:
+                perturbed[offset] += np.random.normal(0, 5)        # focal
+                perturbed[offset+1:offset+4] += np.random.normal(0, 0.1, 3)  # rotvec
+                perturbed[offset+4:offset+7] += np.random.normal(0, 0.1, 3)  # translation
+                offset += 7
+
+        res = optimize.least_squares(
+            residual_function, perturbed, verbose=0, loss="cauchy", ftol=1E-4
+        )
+
+        print(f"Start {start+1}/{num_starts}: cost = {res.cost:.2f}")
+
+        if res.cost < best_cost:
+            best_cost = res.cost
+            best_params = res.x
+
+    print(f"Best cost: {best_cost:.2f}")
+
+    # Restore intrinsics and apply best result
+    for i in range(num_cameras):
+        cameras.set_camera_params(i, intrinsic_matrix=original_intrinsics[i])
+
+    best_poses, best_focals = params_to_camera_poses_and_focals(best_params)
+    for i in range(num_cameras):
+        intrinsic = cameras.get_camera_params(i)["intrinsic_matrix"]
+        intrinsic[0, 0] = best_focals[i]
+        intrinsic[1, 1] = best_focals[i]
+        cameras.set_camera_params(i, intrinsic_matrix=intrinsic.tolist())
+
+    socketio.emit("camera-pose", {"camera_poses": camera_pose_to_serializable(best_poses)})
+    return best_poses
     
 
 def triangulate_point(image_points, camera_poses):
