@@ -218,6 +218,7 @@ def calculate_reprojection_error(image_points, object_point, camera_poses):
 
     image_points = np.array(image_points)
     none_indicies = np.where(np.all(image_points == None, axis=1))[0]
+    valid_cam_indices = np.delete(np.arange(len(image_points)), none_indicies)
     image_points = np.delete(image_points, none_indicies, axis=0)
     camera_poses = np.delete(camera_poses, none_indicies, axis=0)
 
@@ -231,15 +232,15 @@ def calculate_reprojection_error(image_points, object_point, camera_poses):
         if np.all(image_points[i] == None, axis=0):
             continue
         projected_img_points, _ = cv.projectPoints(
-            np.expand_dims(object_point, axis=0).astype(np.float32), 
-            np.array(camera_pose["R"], dtype=np.float64), 
-            np.array(camera_pose["t"], dtype=np.float64), 
-            cameras.get_camera_params(i)["intrinsic_matrix"], 
+            np.expand_dims(object_point, axis=0).astype(np.float32),
+            np.array(camera_pose["R"], dtype=np.float64),
+            np.array(camera_pose["t"], dtype=np.float64),
+            cameras.get_camera_params(valid_cam_indices[i])["intrinsic_matrix"],
             np.array([])
         )
         projected_img_point = projected_img_points[:,0,:][0]
         errors = np.concatenate([errors, (image_points_t[i]-projected_img_point).flatten() ** 2])
-    
+
     return errors.mean()
 
 """
@@ -358,12 +359,11 @@ def _filter_and_subsample_points(image_points, camera_poses, max_points=100):
         if len(errors) > 0:
             # Remove worst 20% of points
             threshold = np.percentile(errors, 80)
-            keep_mask = np.array([
-                calculate_reprojection_error(fp, op, camera_poses) is not None and
-                calculate_reprojection_error(fp, op, camera_poses) < threshold
-                for fp, op in zip(filtered, object_points)
-            ])
-            filtered = filtered[keep_mask]
+            keep_mask = []
+            for fp, op in zip(filtered, object_points):
+                error = calculate_reprojection_error(fp, op, camera_poses)
+                keep_mask.append(error is not None and error < threshold)
+            filtered = filtered[np.array(keep_mask)]
 
     # Subsample if still too many
     if len(filtered) > max_points:
@@ -419,6 +419,7 @@ def triangulate_point(image_points, camera_poses):
     image_points = np.array(image_points)
     cameras = Cameras.instance()
     none_indicies = np.where(np.all(image_points == None, axis=1))[0]
+    valid_cam_indices = np.delete(np.arange(len(image_points)), none_indicies)
     image_points = np.delete(image_points, none_indicies, axis=0)
     camera_poses = np.delete(camera_poses, none_indicies, axis=0)
 
@@ -429,7 +430,7 @@ def triangulate_point(image_points, camera_poses):
 
     for i, camera_pose in enumerate(camera_poses):
         RT = np.c_[camera_pose["R"], camera_pose["t"]]
-        P = cameras.camera_params[i]["intrinsic_matrix"] @ RT
+        P = cameras.camera_params[valid_cam_indices[i]]["intrinsic_matrix"] @ RT
         Ps.append(P)
 
     # https://temugeb.github.io/computer_vision/2021/02/06/direct-linear-transorms.html
