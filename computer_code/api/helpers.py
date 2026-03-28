@@ -341,38 +341,49 @@ def bundle_adjustment(image_points, camera_poses, socketio):
     cameras = Cameras.instance()
 
     def params_to_camera_poses(params):
-        num_cameras = int(params.size / 6) + 1
+        focal_distances = []
+        num_cameras = int((params.size-1)/7)+1
         camera_poses = [{
             "R": np.eye(3),
             "t": np.array([0,0,0], dtype=np.float32)
         }]
+        focal_distances.append(params[0])
         for i in range(0, num_cameras-1):
+            focal_distances.append(params[i*7+1])
             camera_poses.append({
-                "R": Rotation.as_matrix(Rotation.from_rotvec(params[i*6 : i*6 + 3])),
-                "t": params[i*6 + 3 : i*6 + 6]
+                "R": Rotation.as_matrix(Rotation.from_rotvec(params[i*7 + 2 : i*7 + 3 + 2])),
+                "t": params[i*7 + 3 + 2 : i*7 + 6 + 2]
             })
 
-        return camera_poses
+        return camera_poses, focal_distances
 
     def residual_function(params):
-        camera_poses = params_to_camera_poses(params)
+        camera_poses, focal_distances = params_to_camera_poses(params)
+        for i in range(0, len(camera_poses)):
+            intrinsic = cameras.get_camera_params(i)["intrinsic_matrix"]
+            intrinsic[0, 0] = focal_distances[i]
+            intrinsic[1, 1] = focal_distances[i]
+            # cameras.set_camera_params(i, intrinsic)
         object_points = triangulate_points(image_points, camera_poses)
         errors = calculate_reprojection_errors(image_points, object_points, camera_poses)
         errors = errors.astype(np.float32)
         socketio.emit("camera-pose", {"camera_poses": camera_pose_to_serializable(camera_poses)})
-
+        
         return errors
 
-    init_params = np.array([])
-    for camera_pose in camera_poses[1:]:
+    focal_distance = cameras.get_camera_params(0)["intrinsic_matrix"][0,0]
+    init_params = np.array([focal_distance])
+    for i, camera_pose in enumerate(camera_poses[1:]):
         rot_vec = Rotation.as_rotvec(Rotation.from_matrix(camera_pose["R"])).flatten()
+        focal_distance = cameras.get_camera_params(i)["intrinsic_matrix"][0,0]
+        init_params = np.concatenate([init_params, [focal_distance]])
         init_params = np.concatenate([init_params, rot_vec])
         init_params = np.concatenate([init_params, camera_pose["t"].flatten()])
 
     res = optimize.least_squares(
         residual_function, init_params, verbose=2, loss="cauchy", ftol=1E-2
     )
-    return params_to_camera_poses(res.x)
+    return params_to_camera_poses(res.x)[0]
     
 
 def triangulate_point(image_points, camera_poses):
